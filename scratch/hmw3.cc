@@ -72,8 +72,6 @@ main(int argc, char* argv[])
     Ptr<Node> nC = CreateObject<Node>();
     Ptr<Node> nD = CreateObject<Node>();
 
-    // Gorouping nodes  into container c
-
     NodeContainer c = NodeContainer(nA, nB, nC, nD);
 
     //Installs the Internet stack (IPv4, TCP, UDP) on all nodes in c.
@@ -81,21 +79,22 @@ main(int argc, char* argv[])
     internet.Install(c);
 
     // Point-to-point links
-    //Defines two node pairs for creating links: nAnB connects nA to nB. nBnC connects nB to nC.
-
     NodeContainer nAnB = NodeContainer(nA, nB);
     NodeContainer nBnC = NodeContainer(nB, nC);
     NodeContainer nCnD = NodeContainer(nC, nD);
+    NodeContainer shortcut = NodeContainer(nA, nC);
+    NodeContainer& nAnC = shortcut;
 
     // Create channels first without IP addressing information
-    //Configures a point-to-point link with a data rate of 5 Mbps and 2 ms delay.
-    //Installs these configurations on the node pairs nAnB and nBnC.
+    // Configures a point-to-point link with a data rate of 5 Mbps and 2 ms delay.
+    // Installs these configurations on the node pairs nAnB and nBnC.
     PointToPointHelper p2p;
     p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
     p2p.SetChannelAttribute("Delay", StringValue("2ms"));
     NetDeviceContainer dAdB = p2p.Install(nAnB);
     NetDeviceContainer dBdC = p2p.Install(nBnC);
     NetDeviceContainer dCdD = p2p.Install(nCnD);
+    NetDeviceContainer dAdC = p2p.Install(nAnC); // shortcut
     
     //Creates a CSMA (Carrier-Sense Multiple Access) network device,
     //(CSMA allows devices to "listen" to the channel before sending data, reducing collisions.)
@@ -137,6 +136,10 @@ main(int argc, char* argv[])
     ipv4.SetBase("10.1.3.0", SUBNET_MASK);
     Ipv4InterfaceContainer iCiD = ipv4.Assign(dCdD);
     print_interface_ipv4(iCiD);
+    // shortcut A - C
+    ipv4.SetBase("10.1.4.0", SUBNET_MASK);
+    Ipv4InterfaceContainer iAiC = ipv4.Assign(dAdC);
+    print_interface_ipv4(iAiC);
 
     //Manually assigns the IP 172.16.1.1/32 to nA on deviceA.
     Ptr<Ipv4> ipv4A = nA->GetObject<Ipv4>();
@@ -178,6 +181,7 @@ main(int argc, char* argv[])
     Ptr<Ipv4StaticRouting> staticRoutingA = ipv4RoutingHelper.GetStaticRouting(ipv4A);
     staticRoutingA->AddHostRouteTo(Ipv4Address("192.168.1.1"), Ipv4Address("10.1.1.2"), 1);
 
+    // A routes to C through B
     Ptr<Ipv4StaticRouting> staticRoutingB = ipv4RoutingHelper.GetStaticRouting(ipv4B);
     staticRoutingB->AddHostRouteTo(Ipv4Address("192.168.1.1"), Ipv4Address("10.1.2.2"), 2);
 
@@ -190,6 +194,7 @@ main(int argc, char* argv[])
 
     Ptr<Ipv4StaticRouting> staticRoutingC_rev = ipv4RoutingHelper.GetStaticRouting(ipv4C);
     staticRoutingC_rev->AddHostRouteTo(Ipv4Address("172.16.1.1"), Ipv4Address("10.1.2.1"), 1);
+    staticRoutingC_rev->AddHostRouteTo(Ipv4Address("172.16.1.1"), Ipv4Address("10.1.4.1"), 3);
 
     Ptr<Ipv4StaticRouting> staticRoutingB_rev = ipv4RoutingHelper.GetStaticRouting(ipv4B);
     staticRoutingB_rev->AddHostRouteTo(Ipv4Address("172.16.1.1"), Ipv4Address("10.1.1.1"), 1);
@@ -200,7 +205,7 @@ main(int argc, char* argv[])
 
 
     // Create the OnOff application to send UDP datagrams of size 210 bytes at a rate of 448 Kb/s
-    uint16_t port = 9; 
+    constexpr uint16_t port = 9; 
     //Defines the port number for the data packets that will be sent.
     
     OnOffHelper onoff = OnOffHelper("ns3::UdpSocketFactory", Address(InetSocketAddress(ifInAddrD.GetLocal(), port)));
@@ -212,18 +217,22 @@ main(int argc, char* argv[])
     //Configures the application to send data at a constant rate.
 
     ApplicationContainer apps = onoff.Install(nA);
+    NS_LOG_UNCOND("OnOff application installed on Node A to send packets to Node D.");
     //OnOff application on node nA.
-
     apps.Start(Seconds(1.0));
     apps.Stop(Seconds(10.0));
+
+    constexpr uint16_t reverse_port = port + 1;
+    OnOffHelper onoff_reverse = OnOffHelper("ns3::UdpSocketFactory", Address(InetSocketAddress(ifInAddrA.GetLocal(), reverse_port)));
+    onoff_reverse.SetConstantRate(DataRate(6000));
+    ApplicationContainer reverse_apps = onoff_reverse.Install(nD);
+    reverse_apps.Start(Seconds(1.0));
+    reverse_apps.Stop(Seconds(10.0));
+
     //Specifies the time window for the application to start and stop
-
-
-    NS_LOG_UNCOND("OnOff application installed on Node A to send packets to Node D.");
-
+    NS_LOG_UNCOND("OnOff application installed on Node D to send packets to Node A.");
 
     // Create a packet sink to receive packets
-
     PacketSinkHelper sink("ns3::UdpSocketFactory", Address(InetSocketAddress(Ipv4Address::GetAny(), port)));
     // Initializes a PacketSinkHelper, which is an application designed to receive packets.
     //that this application will receive UDP packets from nC by listening on the same port 
@@ -233,13 +242,17 @@ main(int argc, char* argv[])
     
     apps = sink.Install(nD);
     //Installs the PacketSinkHelper application on node nD.
+    NS_LOG_UNCOND("PacketSink application installed on Node D to receive packets.");
 
     apps.Start(Seconds(1.0));
     apps.Stop(Seconds(10.0));
     //Specifies the active period for the packet sink application
 
-    NS_LOG_UNCOND("PacketSink application installed on Node D to receive packets.");
-
+    PacketSinkHelper reverse_sink("ns3::UdpSocketFactory", Address(InetSocketAddress(Ipv4Address::GetAny(), reverse_port)));
+    reverse_apps = reverse_sink.Install(nA);
+    NS_LOG_UNCOND("PacketSink application installed on Node A to receive packets.");
+    reverse_apps.Start(Seconds(1.0));
+    reverse_apps.Stop(Seconds(10.0));
 
     // Enable ASCII and PCAP tracing
     AsciiTraceHelper ascii;
